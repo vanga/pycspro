@@ -3,7 +3,6 @@ import configparser
 from collections import OrderedDict
 import json
 
-
 class MultiOrderedDict(OrderedDict):
     def __setitem__(self, key, value):
         if isinstance(value, list) and key in self:
@@ -91,10 +90,12 @@ class DictionaryBuilder:
             'Note': '',
         }
         section.update(attributes)
-        self.tree['Dictionary']['Level'] = section
+        levels = self.tree['Dictionary'].get("Levels", [])
+        levels.append(section)
+        self.tree['Dictionary']["Levels"] = levels
 
     def iditems_received(self, attributes):
-        self.tree['Dictionary']['Level']['IdItems'] = []
+        self.tree['Dictionary']['Levels'][-1]['IdItems'] = []
         
     def item_received(self, attributes):
         section = {
@@ -111,8 +112,7 @@ class DictionaryBuilder:
             'OccurrenceLabel': [],
         }
         section.update(attributes)
-        #self.tree['Dictionary']['Level']['IdItems'].append({'Item': section})
-        self.tree['Dictionary']['Level']['IdItems'].append(section)
+        self.tree['Dictionary']['Levels'][-1]['IdItems'].append(section)
         
     def valueset_received(self, attributes):
         section = {
@@ -122,11 +122,9 @@ class DictionaryBuilder:
             'Value': [],
         }
         section.update(attributes)
-        #value_sets = self.tree['Dictionary']['Level']['IdItems'][-1]['Item'].get('ValueSets', [])
-        value_sets = self.tree['Dictionary']['Level']['IdItems'][-1].get('ValueSets', [])
+        value_sets = self.tree['Dictionary']['Levels'][-1]['IdItems'][-1].get('ValueSets', [])
         value_sets.append(section)
-        #self.tree['Dictionary']['Level']['IdItems'][-1]['Item']['ValueSets'] = value_sets
-        self.tree['Dictionary']['Level']['IdItems'][-1]['ValueSets'] = value_sets
+        self.tree['Dictionary']['Levels'][-1]['IdItems'][-1]['ValueSets'] = value_sets
         
     def record_received(self, attributes):
         section = {
@@ -140,9 +138,9 @@ class DictionaryBuilder:
             'OccurrenceLabel': []
         }
         section.update(attributes)
-        records = self.tree['Dictionary']['Level'].get('Records', [])
+        records = self.tree['Dictionary']['Levels'][-1].get('Records', [])
         records.append(section)
-        self.tree['Dictionary']['Level']['Records'] = records
+        self.tree['Dictionary']['Levels'][-1]['Records'] = records
         
     def record_item_received(self, attributes):
         section = {
@@ -159,10 +157,17 @@ class DictionaryBuilder:
             'OccurrenceLabel': [],
         }
         section.update(attributes)
-        #items = self.tree['Dictionary']['Level']['Records'][-1]['Record'].get('Items', [])
-        items = self.tree['Dictionary']['Level']['Records'][-1].get('Items', [])
-        items.append(section)
-        self.tree['Dictionary']['Level']['Records'][-1]['Items'] = items
+        sub_item = any(attr[0] == "ItemType" and attr[1] == "SubItem" for attr in attributes)
+        if sub_item:
+            last_item = self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'][-1]
+            sub_items = last_item.get("SubItems", [])
+            sub_items.append(section)
+            last_item['SubItems'] = sub_items
+            self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'][-1] = last_item
+        else:
+            items = self.tree['Dictionary']['Levels'][-1]['Records'][-1].get('Items', [])
+            items.append(section)
+            self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'] = items
         
     def record_valueset_received(self, attributes):
         section = {
@@ -172,10 +177,23 @@ class DictionaryBuilder:
             'Value': [],
         }
         section.update(attributes)
-        value_sets = self.tree['Dictionary']['Level']['Records'][-1]['Items'][-1].get('ValueSets', [])
-        value_sets.append(section)
-        self.tree['Dictionary']['Level']['Records'][-1]['Items'][-1]['ValueSets'] = value_sets
+        last_item = self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'][-1]
+        if "SubItems" in last_item and len(last_item["SubItems"]) > 0:
+            last_sub_item = last_item["SubItems"][-1]
+            value_sets = last_sub_item.get("ValueSets", [])
+            value_sets.append(section)
+            last_sub_item['ValueSets'] = value_sets
+            self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'][-1]["SubItems"][-1]['ValueSets'] = value_sets
+        else:
+            value_sets = last_item.get('ValueSets', [])
+            value_sets.append(section)
+            self.tree['Dictionary']['Levels'][-1]['Records'][-1]['Items'][-1]['ValueSets'] = value_sets
 
+    def relation_received(self, attributes):
+        raw_relations = self.tree['Dictionary'].get("RawRelations", [])
+        raw_relations.append(attributes)
+        self.tree['Dictionary']['RawRelations'] = raw_relations
+    
     def completed(self, attributes):
         self.is_built = True
 
@@ -198,12 +216,13 @@ class DictionaryParser:
     def parse(self):
         model = CSProDictionary()
         states = ['empty', 'dictionary_received', 'languages_received', 'level_received', 'iditems_received', 'item_received', 
-                  'valueset_received', 'record_received', 'record_item_received', 'record_valueset_received', 'completed']
+                  'valueset_received', 'record_received', 'record_item_received', 'record_valueset_received', 'relation_received', 'completed']
         transitions = [
             {'trigger': 'Dictionary', 'source': 'empty', 'dest': 'dictionary_received'},
             {'trigger': 'Languages', 'source': 'dictionary_received', 'dest': 'languages_received'},
             {'trigger': 'Level', 'source': 'languages_received', 'dest': 'level_received'},
             {'trigger': 'Level', 'source': 'dictionary_received', 'dest': 'level_received'},
+            {'trigger': 'Level', 'source': 'record_valueset_received', 'dest': 'level_received'},
             {'trigger': 'IdItems', 'source': 'level_received', 'dest': 'iditems_received'},
             {'trigger': 'Item', 'source': 'iditems_received', 'dest': 'item_received'},
             {'trigger': 'Item', 'source': 'item_received', 'dest': 'item_received'},
@@ -219,7 +238,10 @@ class DictionaryParser:
             {'trigger': 'Item', 'source': 'record_valueset_received', 'dest': 'record_item_received'},
             {'trigger': 'Record', 'source': 'record_item_received', 'dest': 'record_received'},
             {'trigger': 'Record', 'source': 'record_valueset_received', 'dest': 'record_received'},
+            {'trigger': 'Relation', 'source': 'record_valueset_received', 'dest': 'relation_received'},
+            {'trigger': 'Relation', 'source': 'relation_received', 'dest': 'relation_received'},
             {'trigger': 'EOF', 'source': 'record_valueset_received', 'dest': 'completed'},
+            {'trigger': 'EOF', 'source': 'relation_received', 'dest': 'completed'},
             {'trigger': 'EOF', 'source': 'record_item_received', 'dest': 'completed'}
         ]
 
@@ -248,7 +270,7 @@ class DictionaryParser:
     
     def get_column_labels(self, record_name):
         if self.parsed_dictionary is not None:
-            record = list(filter(lambda r: r['Name'] == record_name, self.parsed_dictionary['Dictionary']['Level']['Records']))
+            record = list(filter(lambda r: r['Name'] == record_name, self.parsed_dictionary['Dictionary']['Levels'][-1]['Records']))
             if len(record) > 0:
                 items = record[0]['Items']
                 return dict(list(
@@ -271,7 +293,7 @@ class DictionaryParser:
     
     def get_value_labels(self, record_name, desired_columns = None):
         if self.parsed_dictionary is not None:
-            record = list(filter(lambda r: r['Name'] == record_name, self.parsed_dictionary['Dictionary']['Level']['Records']))
+            record = list(filter(lambda r: r['Name'] == record_name, self.parsed_dictionary['Dictionary']['Levels'][-1]['Records']))
             value_labels = {}
             if len(record) > 0:
                 items = record[0]['Items']
